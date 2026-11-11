@@ -1,0 +1,17 @@
+# Godot 4 generated
+.godot/
+.import/
+*.translation
+
+# Exports
+export.cfg
+export_credentials.cfg
+*.exe
+*.pck
+builds/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
