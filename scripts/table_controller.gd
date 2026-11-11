@@ -17,6 +17,8 @@ const DEALER_BUST_LIMIT := 3
 const DEALER_TARGET := 4
 const DEALER_PUSH_LIMIT := 5
 const BUST_DAMAGE := 2
+## Experiment: a Skull rolled on a Push destroys one banked Blade/Ward (not on the opening roll).
+const SKULL_DESTROYS_BANKED := true
 
 const PLAYER_COLOR := Color(0.35, 0.95, 0.55)
 const DEALER_COLOR := Color(0.92, 0.78, 0.35)
@@ -300,6 +302,7 @@ func _on_push_pressed() -> void:
 	if game_over or not hand_rolled:
 		return
 	var any_live := false
+	var new_skulls := 0
 	for dv in player_dice:
 		if dv.is_live():
 			any_live = true
@@ -307,14 +310,36 @@ func _on_push_pressed() -> void:
 			dv.roll(s)
 			if s == Sym.Kind.SKULL:
 				player_debt += 1
+				new_skulls += 1
 	if not any_live:
 		message_label.text = "Nothing left to push — bank it or stick."
 		_refresh_all()
 		return
 	if _check_player_bust():
 		return
-	message_label.text = "Pushed. The House is patient."
+	var lost := 0
+	if SKULL_DESTROYS_BANKED and new_skulls > 0:
+		lost = _destroy_banked(new_skulls)
+	if lost > 0:
+		message_label.text = "Pushed. %d of your banked dice shattered — the House takes its cut." % lost
+	else:
+		message_label.text = "Pushed. The House is patient."
 	_refresh_all()
+
+## Each fresh Skull shatters one banked Blade/Ward at random (spent dice go blank).
+## Returns how many were destroyed.
+func _destroy_banked(count: int) -> int:
+	var destroyed := 0
+	for _i in range(count):
+		var victims: Array[DieVisual] = []
+		for dv in player_dice:
+			if dv.is_banked() and (dv.symbol == Sym.Kind.BLADE or dv.symbol == Sym.Kind.WARD):
+				victims.append(dv)
+		if victims.is_empty():
+			break
+		victims[rng.randi_range(0, victims.size() - 1)].set_empty()
+		destroyed += 1
+	return destroyed
 
 func _check_player_bust() -> bool:
 	if player_debt >= BUST_LIMIT:
@@ -365,6 +390,19 @@ func _run_dealer_turn() -> void:
 		for i in range(active):
 			results.append(Sym.roll(dealer_rng))
 		var next_active := 0
+		# Skulls on a push (not the opening roll) shatter dice banked on earlier rolls.
+		if SKULL_DESTROYS_BANKED and pushes > 0:
+			for s in results:
+				if s != Sym.Kind.SKULL:
+					continue
+				var blades: int = banked[Sym.Kind.BLADE]
+				var wards: int = banked[Sym.Kind.WARD]
+				if blades + wards == 0:
+					break
+				if dealer_rng.randi_range(1, blades + wards) <= blades:
+					banked[Sym.Kind.BLADE] -= 1
+				else:
+					banked[Sym.Kind.WARD] -= 1
 		for s in results:
 			if s == Sym.Kind.SKULL:
 				debt += 1
