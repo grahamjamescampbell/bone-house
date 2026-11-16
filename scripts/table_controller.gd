@@ -12,11 +12,8 @@ extends Control
 ## and the Dealer's-knuckle acquisition ritual are not implemented yet.
 
 const DICE_COUNT := 5
-const BUST_LIMIT := 3
-const DEALER_BUST_LIMIT := 3
 const DEALER_TARGET := 4
 const DEALER_PUSH_LIMIT := 5
-const BUST_DAMAGE := 2
 
 const PLAYER_COLOR := Color(0.35, 0.95, 0.55)
 const DEALER_COLOR := Color(0.92, 0.78, 0.35)
@@ -42,6 +39,8 @@ var rng := RandomNumberGenerator.new()
 var dealer_rng := RandomNumberGenerator.new()
 
 var player_hp := 20
+var rules: TableRules = TableRules.create([])
+var pushes_used := 0
 var player_max_hp := 20
 var dealer_hp := 20
 var dealer_max_hp := 20
@@ -68,6 +67,8 @@ var favor_label: Label
 var player_debt_label: Label
 var dealer_debt_label: Label
 var battlefield: Control
+var mod_label: Label
+var mod_select: OptionButton
 
 var roll_btn: Button
 var push_btn: Button
@@ -83,8 +84,17 @@ func _ready() -> void:
 
 	_reset_banked(player_banked)
 	_build_ui()
-	_refresh_all()
+	_apply_rules([])
 	_start_hand()
+
+## Builds the Table's rules from a list of modifier ids and resets HP to match.
+func _apply_rules(ids: Array) -> void:
+	rules = TableRules.create(ids)
+	player_max_hp = rules.player_max_hp
+	dealer_max_hp = rules.dealer_max_hp
+	player_hp = player_max_hp
+	dealer_hp = dealer_max_hp
+	mod_label.text = rules.summary()
 
 func _reseed_dealer() -> void:
 	# The Dealer's dice are a stock set seeded once per Table, per the design
@@ -134,6 +144,13 @@ func _build_ui() -> void:
 	dealer_hp_bar = HPBar.new()
 	dealer_hp_bar.bar_color = DEALER_COLOR
 	dealer_header.add_child(dealer_hp_bar)
+
+	mod_label = Label.new()
+	mod_label.add_theme_font_size_override("font_size", 14)
+	mod_label.add_theme_color_override("font_color", Color(0.75, 0.75, 0.7))
+	mod_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	mod_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	root.add_child(mod_label)
 
 	var dealer_row := HBoxContainer.new()
 	dealer_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -225,6 +242,15 @@ func _build_ui() -> void:
 	stick_btn.pressed.connect(_on_stick_pressed)
 	button_row.add_child(stick_btn)
 
+	mod_select = OptionButton.new()
+	mod_select.add_item("Plain table")
+	for id in Modifiers.ALL:
+		mod_select.add_item(Modifiers.title(id))
+	mod_select.custom_minimum_size = Vector2(150, 44)
+	mod_select.tooltip_text = "Test: pick a modifier to start a new table with it"
+	mod_select.item_selected.connect(_on_modifier_selected)
+	button_row.add_child(mod_select)
+
 	restart_btn = _make_button("NEW TABLE", Color(1, 0.3, 0.3))
 	restart_btn.pressed.connect(_on_restart_pressed)
 	button_row.add_child(restart_btn)
@@ -264,6 +290,7 @@ func _reset_banked(d: Dictionary) -> void:
 	d[Sym.Kind.FAVOR] = 0
 
 func _start_hand() -> void:
+	pushes_used = 0
 	player_debt = 0
 	dealer_debt = 0
 	hand_rolled = false
@@ -289,7 +316,7 @@ func _on_roll_pressed() -> void:
 	for dv in player_dice:
 		var s := Sym.roll(rng)
 		dv.roll(s)
-		if s == Sym.Kind.SKULL:
+		if s == Sym.Kind.SKULL and rules.opening_skulls_count:
 			player_debt += 1
 	if _check_player_bust():
 		return
@@ -297,9 +324,14 @@ func _on_roll_pressed() -> void:
 	_refresh_all()
 
 func _on_push_pressed() -> void:
-	if game_over or not hand_rolled:
+	if game_over or not hand_rolled or animating:
+		return
+	if rules.push_limit >= 0 and pushes_used >= rules.push_limit:
+		message_label.text = "No pushes left — bank it or stick."
+		_refresh_all()
 		return
 	var any_live := false
+	var new_skulls := 0
 	for dv in player_dice:
 		if dv.is_live():
 			any_live = true
@@ -307,19 +339,42 @@ func _on_push_pressed() -> void:
 			dv.roll(s)
 			if s == Sym.Kind.SKULL:
 				player_debt += 1
+				new_skulls += 1
 	if not any_live:
 		message_label.text = "Nothing left to push — bank it or stick."
 		_refresh_all()
 		return
+	pushes_used += 1
 	if _check_player_bust():
 		return
-	message_label.text = "Pushed. The House is patient."
+	var lost := 0
+	if rules.skull_push_takes_banked and new_skulls > 0:
+		lost = _destroy_banked(new_skulls)
+	if lost > 0:
+		message_label.text = "Pushed. %d of your banked dice shattered — the House takes its cut." % lost
+	else:
+		message_label.text = "Pushed. The House is patient."
 	_refresh_all()
 
+## Heavy Hand: each fresh Skull shatters one banked Blade/Ward at random (the
+## spent die goes blank for the rest of the hand). Returns how many were destroyed.
+func _destroy_banked(count: int) -> int:
+	var destroyed := 0
+	for _i in range(count):
+		var victims: Array[DieVisual] = []
+		for dv in player_dice:
+			if dv.is_banked() and (dv.symbol == Sym.Kind.BLADE or dv.symbol == Sym.Kind.WARD):
+				victims.append(dv)
+		if victims.is_empty():
+			break
+		victims[rng.randi_range(0, victims.size() - 1)].set_empty()
+		destroyed += 1
+	return destroyed
+
 func _check_player_bust() -> bool:
-	if player_debt >= BUST_LIMIT:
-		player_hp -= BUST_DAMAGE
-		message_label.text = "BUST. Three skulls — you flinched and it cost you %d." % BUST_DAMAGE
+	if player_debt >= rules.bust_limit:
+		player_hp -= rules.bust_damage
+		message_label.text = "BUST. %d skulls — you flinched and it cost you %d." % [rules.bust_limit, rules.bust_damage]
 		if player_hp <= 0:
 			_end_game(false)
 		else:
@@ -360,24 +415,43 @@ func _run_dealer_turn() -> void:
 	var pushes := 0
 	var busted := false
 
-	while active > 0 and pushes < DEALER_PUSH_LIMIT:
+	# The House's rolls (opening roll plus pushes) obey the same push limit.
+	var max_rolls := DEALER_PUSH_LIMIT
+	if rules.push_limit >= 0:
+		max_rolls = min(DEALER_PUSH_LIMIT, rules.push_limit + 1)
+
+	while active > 0 and pushes < max_rolls:
 		var results: Array[int] = []
 		for i in range(active):
 			results.append(Sym.roll(dealer_rng))
 		var next_active := 0
+		# Heavy Hand: Skulls on a push shatter dice banked on earlier rolls.
+		if rules.skull_push_takes_banked and pushes > 0:
+			for s in results:
+				if s != Sym.Kind.SKULL:
+					continue
+				var blades: int = banked[Sym.Kind.BLADE]
+				var wards: int = banked[Sym.Kind.WARD]
+				if blades + wards == 0:
+					break
+				if dealer_rng.randi_range(1, blades + wards) <= blades:
+					banked[Sym.Kind.BLADE] -= 1
+				else:
+					banked[Sym.Kind.WARD] -= 1
 		for s in results:
 			if s == Sym.Kind.SKULL:
-				debt += 1
+				if pushes > 0 or rules.opening_skulls_count:
+					debt += 1
 			elif s == Sym.Kind.BLADE or s == Sym.Kind.WARD:
 				banked[s] += 1
 			else:
 				next_active += 1
 		active = next_active
 		pushes += 1
-		if debt >= DEALER_BUST_LIMIT:
+		if debt >= rules.bust_limit:
 			busted = true
 			break
-		if banked[Sym.Kind.BLADE] + banked[Sym.Kind.WARD] >= DEALER_TARGET or debt >= 2:
+		if banked[Sym.Kind.BLADE] + banked[Sym.Kind.WARD] >= DEALER_TARGET or debt >= rules.bust_limit - 1:
 			break
 
 	dealer_debt = debt
@@ -690,7 +764,13 @@ func _refresh_all() -> void:
 
 	roll_btn.text = "CONTINUE" if awaiting_continue else "ROLL"
 	roll_btn.disabled = game_over or animating or (hand_rolled and not awaiting_continue)
-	push_btn.disabled = game_over or animating or awaiting_continue or not hand_rolled or not _has_live_die()
+	push_btn.disabled = game_over or animating or awaiting_continue or not hand_rolled or not _has_live_die() \
+			or (rules.push_limit >= 0 and pushes_used >= rules.push_limit)
+	if rules.push_limit >= 0:
+		push_btn.text = "PUSH (%d)" % max(rules.push_limit - pushes_used, 0)
+	else:
+		push_btn.text = "PUSH"
+	mod_select.disabled = animating
 	stick_btn.disabled = game_over or animating or awaiting_continue or not hand_rolled
 	restart_btn.disabled = animating
 
@@ -702,17 +782,31 @@ func _has_live_die() -> bool:
 
 func _debt_pips(count: int) -> String:
 	var s := ""
-	for i in range(BUST_LIMIT):
+	for i in range(rules.bust_limit):
 		s += "X" if i < count else "."
-		if i < BUST_LIMIT - 1:
+		if i < rules.bust_limit - 1:
 			s += " "
 	return s
 
 func _on_restart_pressed() -> void:
+	_new_table(_selected_modifier_ids())
+
+func _on_modifier_selected(_index: int) -> void:
+	if animating:
+		return
+	_new_table(_selected_modifier_ids())
+
+func _selected_modifier_ids() -> Array:
+	var idx: int = mod_select.selected
+	if idx <= 0:
+		return []
+	return [Modifiers.ALL[idx - 1]]
+
+## Starts a fresh Table with the given modifiers.
+func _new_table(ids: Array) -> void:
 	game_over = false
-	player_hp = player_max_hp
-	dealer_hp = dealer_max_hp
 	gold = 0
 	favor = 0
+	_apply_rules(ids)
 	_reseed_dealer()
 	_start_hand()
